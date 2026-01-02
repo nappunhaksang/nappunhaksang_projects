@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# sys_audit.sh — System audit report
+# Usage: ./sys_audit.sh [--help] [--top N] [--largest N] [--dir PATH]
+set -euo pipefail
+TOP_N=5; LARGEST_N=5; SCAN_DIR="$PWD"
+print_usage(){ sed -n '2,24p' "$0"; }
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --top) TOP_N="${2:-}"; shift 2;;
+    --largest) LARGEST_N="${2:-}"; shift 2;;
+    --dir) SCAN_DIR="${2:-}"; shift 2;;
+    --help|-h) print_usage; exit 0;;
+    *) echo "Unknown argument: $1" >&2; print_usage; exit 1;;
+  esac
+done
+[[ -d "$SCAN_DIR" ]] || { echo "Directory not found: $SCAN_DIR" >&2; exit 2; }
+section(){ printf "\n\033[1m== %s ==\033[0m\n" "$1"; }
+distro(){ if command -v lsb_release >/dev/null; then lsb_release -ds;
+  elif [[ -f /etc/os-release ]]; then . /etc/os-release; echo "${PRETTY_NAME:-Unknown}";
+  else uname -srvmo; fi; }
+echo "sys_audit.sh — $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+echo "Host: $(hostname) | User: $(whoami)"
+echo "Distro: $(distro)"
+echo "Kernel: $(uname -r)"
+section "System & Session"
+echo "Uptime: $(uptime -p 2>/dev/null || true)"
+echo "Logins (who): $(who | wc -l | awk '{print $1}')"
+echo "Default shell: ${SHELL:-unknown}"
+echo "Timezone: $(timedatectl show -p Timezone --value 2>/dev/null || echo 'unknown')"
+section "Resources"
+echo "[Memory]"; command -v free >/dev/null && free -h || echo "free not found"
+echo -e "\n[Disk]"
+df -hT | awk 'NR==1 || /^\/dev/ {printf "%-24s %-6s %-6s %-6s %-6s %-6s %s\n",$1,$2,$3,$4,$5,$6,$7}'
+section "Top Processes (CPU)"
+ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -n $((TOP_N+1))
+section "Top Processes (MEM)"
+ps -eo pid,comm,%mem,%cpu --sort=-%mem | head -n $((TOP_N+1))
+section "Networking"
+echo "IPv4 addresses:"; ip -o -4 addr show 2>/dev/null | awk '{print "  "$2": "$4}' || true
+echo "Routes:"; (ip route show 2>/dev/null | sed 's/^/  /') || true
+echo "Listening sockets (first 10):"; (ss -tuln 2>/dev/null | head -n 10) || true
+section "Systemd Health"
+echo "Failed units (if any):"; (systemctl --failed --no-legend 2>/dev/null || true) | sed 's/^/  /'
+echo "Last boot warnings/errors (journalctl):"
+(journalctl -p warning -b --no-pager -n 20 2>/dev/null || true)
+section "Largest Files"
+echo "Scanning: $SCAN_DIR (depth<=3)"
+if command -v find >/dev/null; then
+  if find "$SCAN_DIR" -maxdepth 3 -type f -printf '%s\t%p\n' >/dev/null 2>&1; then
+    find "$SCAN_DIR" -maxdepth 3 -type f -printf '%s\t%p\n' \
+      | sort -nr | head -n "$LARGEST_N" \
+      | awk '{size=$1; $1=""; sub(/^\t/,""); human=size; unit="B";
+              split("B KB MB GB TB PB",u," "); for(i=1;i<=6 && human>=1024;i++){human/=1024; unit=u[i+1]}
+              printf "%8.2f %2s  %s\n", human, unit, $0 }'
+  else
+    find "$SCAN_DIR" -maxdepth 3 -type f -exec du -b {} + 2>/dev/null \
+      | sort -nr | head -n "$LARGEST_N" \
+      | awk '{size=$1; $1=""; human=size; unit="B";
+              split("B KB MB GB TB PB",u," "); for(i=1;i<=6 && human>=1024;i++){human/=1024; unit=u[i+1]}
+              printf "%8.2f %2s  %s\n", human, unit, $0 }'
+  fi
+fi
+section "Security Baseline (quick checks)"
+echo "Zombie processes: $(ps -eo stat | awk '$1 ~ /Z/ {z++} END {print z+0}')"
+echo "Recent apt activity (last ~20 lines):"
+[[ -f /var/log/apt/history.log ]] && tail -n 20 /var/log/apt/history.log || echo "  No apt history available."
+echo; echo "Done."
